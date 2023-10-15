@@ -1,0 +1,102 @@
+trigger:
+  branches:
+    include:
+      - main
+      - master
+  paths:
+    include:
+      - js/**/*
+      - azure-devops/js-frontend/*
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: OctopusServer
+    displayName: The name of the Octopus connection
+    default: Octopus
+    type: string
+  - name: OctopusSpace
+    displayName: The ID of the Octopus space
+    default: 'Spaces-1370'
+    type: string
+  - name: OctopusProject
+    displayName: The ID of the Octopus project
+    default: 'Projects-3449'
+    type: string
+
+stages:
+  - stage: build
+    displayName: Build
+    jobs:
+      - job: build_app
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Bash@3
+            displayName: "Install Libraries"
+            inputs:
+              targetType: inline
+              script: yarn install
+              workingDirectory: js/frontend
+          - task: Bash@3
+            displayName: "Build Application"
+            inputs:
+              targetType: inline
+              script: yarn build
+              workingDirectory: js/frontend
+          - task: Bash@3
+            displayName: "Update Build Version"
+            inputs:
+              targetType: inline
+              script: cat <<< $(jq '.frontendVersion = "1.0.$(Build.BuildNumber)"' build/config.json) > build/config.json
+              workingDirectory: js/frontend
+          - publish: './js/frontend/build'
+            displayName: 'Capture Artifacts'
+            artifact: jsBuild
+  - stage: deploy
+    displayName: Deploy
+    jobs:
+      - job: deploy_app
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          # Download the artifact generated in the last stage
+          - download: current
+            artifact: jsBuild
+          # The Octopus CLI needs to be installed to support the push, create release, and deploy release steps
+          - task: OctoInstaller@5
+            inputs:
+              version: '*'
+          # Create a package with a filename that captures the package id and version. This package is then
+          # ready to be used to the Octopus built in feed.
+          - task: OctopusPack@4
+            inputs:
+              PackageId: 'octopub-frontend'
+              PackageFormat: 'Zip'
+              PackageVersion: '1.0.$(Build.BuildNumber)'
+              SourcePath: '$(Pipeline.Workspace)/jsBuild'
+              Include: "**"
+              Overwrite: true
+          # Push the package to the built-in feed.
+          - task: OctopusPush@5
+            inputs:
+              OctoConnectedServiceName: ${{ parameters.OctopusServer }}
+              Space: ${{ parameters.OctopusSpace }}
+              Package: 'octopub-frontend.1.0.$(Build.BuildNumber).zip'
+              Replace: 'true'
+          # Create a release in Octopus.
+          - task: OctopusCreateRelease@5
+            inputs:
+              OctoConnectedServiceName: ${{ parameters.OctopusServer }}
+              Space: ${{ parameters.OctopusSpace }}
+              ProjectName: ${{ parameters.OctopusProject }}
+              ReleaseNumber: '1.0.$(Build.BuildNumber)'
+          # Deploy the release in Octopus.
+          - task: OctopusDeployRelease@5
+            inputs:
+              OctoConnectedServiceName: ${{ parameters.OctopusServer }}
+              Space: ${{ parameters.OctopusSpace }}
+              Project: ${{ parameters.OctopusProject }}
+              ReleaseNumber: '1.0.$(Build.BuildNumber)'
+              Environments: 'Development'
